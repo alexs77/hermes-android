@@ -136,4 +136,24 @@ class WebTrustPolicyTest {
         assertThat(voicePolicy.allowsGestureFreeMediaPlayback("http://hermes.example.com:8789/")).isFalse()
         assertThat(voicePolicy.allowsGestureFreeMediaPlayback("https://example.com/")).isFalse()
     }
+
+    @Test
+    fun `http auth challenges are answered only for the exact configured WebUI host`() {
+        assertThat(policy.acceptsHttpAuthChallenge("hermes.example.com")).isTrue()
+        assertThat(policy.acceptsHttpAuthChallenge("HERMES.example.com")).isTrue()
+        // The allowlist tolerates subdomains and lists the dashboard; HTTP auth does not.
+        assertThat(policy.acceptsHttpAuthChallenge("api.hermes.example.com")).isFalse()
+        assertThat(policy.acceptsHttpAuthChallenge("dashboard.example.com")).isFalse()
+        assertThat(policy.acceptsHttpAuthChallenge("example.com")).isFalse()
+        assertThat(policy.acceptsHttpAuthChallenge("evil.example")).isFalse()
+        assertThat(policy.acceptsHttpAuthChallenge("hermes.example.com.evil.example")).isFalse()
+        // Anything that is not a bare host fails closed.
+        assertThat(policy.acceptsHttpAuthChallenge("evil.example/@hermes.example.com")).isFalse()
+        assertThat(policy.acceptsHttpAuthChallenge("evil.example#hermes.example.com")).isFalse()
+        assertThat(policy.acceptsHttpAuthChallenge("")).isFalse()
+        assertThat(policy.acceptsHttpAuthChallenge(null)).isFalse()
+
+        val unconfigured = WebTrustPolicy(UrlPolicy(emptySet()), configuredWebUiUrl = "", configuredDashboardUrl = "")
+        assertThat(unconfigured.acceptsHttpAuthChallenge("hermes.example.com")).isFalse()
+    }
 }

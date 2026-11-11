@@ -222,6 +222,17 @@ Provider/interstitial URLs are not persisted during this pending return, even
 after navigation permission expires. Existing validated OAuth/OIDC handling
 remains separate; arbitrary additional proxy-login origins are not authorized.
 
+A proxy that answers with `401` and `WWW-Authenticate: Basic` instead of a
+redirect (for example Traefik `basicAuth`) triggers WebView's
+`onReceivedHttpAuthRequest`. Android answers it only for the exact configured
+WebUI host and cancels every other host. It first tries credentials remembered
+for the server's exact origin, then shows a native username/password dialog
+with an optional **Remember for this server** choice. Remembered credentials
+stay in the encrypted settings, are removed with the last profile using that
+origin, and are sent by readiness/capability probes as an `Authorization`
+header to that origin only, so a proxy that strips the header before Hermes
+leaves the server's own sign-in working as before.
+
 ## Build and release flow
 
 - Local signed release builds load upload-key credentials from an untracked repo-root `keystore.properties` file.

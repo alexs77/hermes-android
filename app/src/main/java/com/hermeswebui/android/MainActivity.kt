@@ -31,6 +31,7 @@ import android.view.MotionEvent
 import android.view.WindowManager
 import android.webkit.ClientCertRequest
 import android.webkit.CookieManager
+import android.webkit.HttpAuthHandler
 import android.webkit.PermissionRequest
 import android.webkit.ServiceWorkerController
 import android.webkit.SslErrorHandler
@@ -247,6 +248,7 @@ class MainActivity : ComponentActivity() {
     private var lastMainFrameHopUrl: String? = null
     private var serverTypeDocumentGeneration = 0L
     private var proxySignInDialog: android.app.AlertDialog? = null
+    private var httpAuthDialog: android.app.AlertDialog? = null
     private var oauthFlowTimeoutMs: Long = 0
     private val OAUTH_FLOW_TIMEOUT_MS = 5 * 60 * 1000L // 5 minutes
     private val oauthReturnNavigation = OAuthReturnNavigation()
@@ -346,6 +348,7 @@ class MainActivity : ComponentActivity() {
         val defaultUrl = getString(R.string.default_server_url)
         val defaultDashboardUrl = getString(R.string.default_dashboard_url)
         settingsRepository = SettingsRepository(applicationContext)
+        HermesApiClient.basicAuthProvider = settingsRepository::getProxyBasicAuth
         viewModel = ViewModelProvider(
             this,
             MainViewModelFactory(settingsRepository, settingsRepository, defaultUrl, defaultDashboardUrl)
@@ -551,6 +554,7 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         if (::serverProfileCoordinator.isInitialized) serverProfileCoordinator.dispose()
         proxySignInDialog?.dismiss()
+        httpAuthDialog?.dismiss()
         proxyAuthNavigation.clear()
         stopVpnReconnectWaitLoop()
         runCatching { unregisterReceiver(appUpdateDownloadReceiver) }
@@ -1149,6 +1153,10 @@ class MainActivity : ComponentActivity() {
                     }
                     request.proceed(cert.privateKey, cert.certChain)
                 }
+
+                override fun onReceivedHttpAuthRequest(view: WebView?, handler: HttpAuthHandler?, host: String?, realm: String?) {
+                    handleHttpAuthRequest(handler, host, realm)
+                }
             }
 
             setDownloadListener(
@@ -1206,6 +1214,10 @@ class MainActivity : ComponentActivity() {
                 if (!url.isNullOrBlank()) {
                     handlePopupPageStarted(popup, url)
                 }
+            }
+
+            override fun onReceivedHttpAuthRequest(view: WebView?, handler: HttpAuthHandler?, host: String?, realm: String?) {
+                handleHttpAuthRequest(handler, host, realm)
             }
         }
     }
@@ -1353,6 +1365,92 @@ class MainActivity : ComponentActivity() {
 
     private fun restrictMediaPlaybackBeforeNavigation(target: String) {
         HermesMediaPlaybackPolicy.beforeAllowedMainFrameNavigation(webView, target, currentWebTrustPolicy())
+    }
+
+    /**
+     * Answers an HTTP auth challenge (`401` + `WWW-Authenticate: Basic`, typically from a reverse
+     * proxy in front of Hermes, #185) for the configured server host only; any other host is
+     * cancelled, as WebView does by default. Remembered credentials are tried once per request
+     * ([HttpAuthHandler.useHttpAuthUsernamePassword] turns false after a rejection), then the
+     * user is asked. Credentials never appear in diagnostics.
+     */
+    private fun handleHttpAuthRequest(handler: HttpAuthHandler?, host: String?, realm: String?) {
+        if (handler == null) return
+        val serverUrl = viewModel.uiState.value.settings.serverUrl
+        if (!currentWebTrustPolicy().acceptsHttpAuthChallenge(host)) {
+            DiagnosticsLogger.record(this, "http_auth_request_blocked", mapOf("host" to host.orEmpty()))
+            handler.cancel()
+            return
+        }
+        val stored = settingsRepository.getProxyBasicAuth(serverUrl)
+        val firstAttempt = handler.useHttpAuthUsernamePassword()
+        if (stored != null && firstAttempt) {
+            handler.proceed(stored.username, stored.password)
+            return
+        }
+        if (httpAuthDialog?.isShowing == true) {
+            handler.cancel()
+            return
+        }
+        DiagnosticsLogger.record(this, "http_auth_request", mapOf(
+            "origin" to DiagnosticsLogger.originOnly(serverUrl),
+            "rejected" to (!firstAttempt).toString()
+        ))
+        val padding = (16 * resources.displayMetrics.density).toInt()
+        val messageView = android.widget.TextView(this).apply {
+            text = buildString {
+                append("$host requires a username and password.")
+                if (!realm.isNullOrBlank()) append("\nRealm: $realm")
+                if (!firstAttempt) append("\nThe previous username or password was not accepted.")
+            }
+            setPadding(0, 0, 0, padding)
+        }
+        val usernameInput = android.widget.EditText(this).apply {
+            hint = "Username"
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            setText(stored?.username.orEmpty())
+        }
+        val passwordInput = android.widget.EditText(this).apply {
+            hint = "Password"
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        val rememberBox = android.widget.CheckBox(this).apply {
+            text = "Remember for this server"
+            isChecked = true
+        }
+        val container = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(padding, padding, padding, 0)
+            addView(messageView)
+            addView(usernameInput)
+            addView(passwordInput)
+            addView(rememberBox)
+        }
+        var answered = false
+        httpAuthDialog = android.app.AlertDialog.Builder(this)
+            .setTitle("Sign in to server")
+            .setView(container)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Sign in") { _, _ ->
+                // A server switch dismisses this dialog; never answer for a server that changed.
+                if (viewModel.uiState.value.settings.serverUrl != serverUrl) return@setPositiveButton
+                answered = true
+                val credentials = HermesApiClient.BasicAuthCredentials(
+                    username = usernameInput.text.toString(),
+                    password = passwordInput.text.toString()
+                )
+                if (rememberBox.isChecked) {
+                    settingsRepository.saveProxyBasicAuth(serverUrl, credentials)
+                } else {
+                    settingsRepository.clearProxyBasicAuth(serverUrl)
+                }
+                handler.proceed(credentials.username, credentials.password)
+            }
+            .setOnDismissListener {
+                if (!answered) handler.cancel()
+                httpAuthDialog = null
+            }
+            .show()
     }
 
     private fun confirmProxySignInRedirect(serverUrl: String, origin: String, target: String) {
@@ -2310,6 +2408,7 @@ class MainActivity : ComponentActivity() {
 
     private fun clearWebViewStateForServerSwitch() {
         proxySignInDialog?.dismiss()
+        httpAuthDialog?.dismiss()
         clearActiveMainFrameOAuth()
         activeOAuthPopup?.let { destroyPopup(it) }
         clearActiveOAuthPopup()

@@ -37,6 +37,17 @@ class WebTrustPolicy(
         return !url.isNullOrBlank() && urlPolicy.isAllowed(url) && isConfiguredWebUiRoute(url)
     }
 
+    /**
+     * An HTTP auth challenge (`401` + `WWW-Authenticate`, #185) may receive credentials only when
+     * it comes from the configured WebUI host. WebView reports a bare host, so this is an exact
+     * host match: never the subdomain-tolerant allowlist, an OAuth provider or another host.
+     */
+    fun acceptsHttpAuthChallenge(host: String?): Boolean {
+        if (host.isNullOrBlank() || host.any { it in "/\\@?#" }) return false
+        val configuredHost = UrlOrigins.hostFrom(configuredWebUiUrl) ?: return false
+        return UrlOrigins.hostFrom("http://$host") == configuredHost
+    }
+
     fun isTrustedNotificationBridgeSource(
         sourceOrigin: String,
         isMainFrame: Boolean,

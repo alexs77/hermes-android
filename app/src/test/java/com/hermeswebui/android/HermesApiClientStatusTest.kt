@@ -248,4 +248,25 @@ class HermesApiClientStatusTest {
         assertThat(result.status).isEqualTo(HermesApiClient.ServerReadinessStatus.UNREACHABLE)
         assertThat(result.message).contains("Could not connect to this server")
     }
+
+    @Test
+    fun `proxy basic credentials encode as an RFC 7617 UTF-8 header`() {
+        val header = HermesApiClient.basicAuthorizationHeader(
+            HermesApiClient.BasicAuthCredentials(username = "alex", password = "pa:ss wörd")
+        )
+
+        // base64("alex:pa:ss wörd") with UTF-8 bytes; a colon in the password stays intact.
+        assertThat(header).isEqualTo("Basic YWxleDpwYTpzcyB3w7ZyZA==")
+        assertThat(
+            HermesApiClient.basicAuthorizationHeader(HermesApiClient.BasicAuthCredentials("Aladdin", "open sesame"))
+        ).isEqualTo("Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==")
+    }
+
+    @Test
+    fun `proxy basic credentials never print the password`() {
+        val text = HermesApiClient.BasicAuthCredentials(username = "alex", password = "s3cret").toString()
+
+        assertThat(text).doesNotContain("s3cret")
+        assertThat(text).contains("alex")
+    }
 }

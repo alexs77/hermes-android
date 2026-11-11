@@ -544,6 +544,26 @@ object HermesApiClient {
         if (cookie != null) {
             setRequestProperty("Cookie", cookie)
         }
+        // Reverse-proxy HTTP Basic credentials (#185) stored for this exact origin, if any. Probes
+        // never follow redirects, so the header cannot be forwarded to another origin.
+        basicAuthProvider?.invoke(baseUrl)?.let { setRequestProperty("Authorization", basicAuthorizationHeader(it)) }
+    }
+
+    /** Username/password a reverse proxy in front of Hermes asks for with `WWW-Authenticate: Basic` (#185). */
+    data class BasicAuthCredentials(val username: String, val password: String) {
+        override fun toString(): String = "BasicAuthCredentials(username=$username, password=***)"
+    }
+
+    /**
+     * Returns the stored proxy Basic credentials for the origin of a probed URL, or null. Set by
+     * `MainActivity`; unset in pure-JVM unit tests, so probes then send no `Authorization` header.
+     */
+    @Volatile
+    var basicAuthProvider: ((url: String) -> BasicAuthCredentials?)? = null
+
+    internal fun basicAuthorizationHeader(credentials: BasicAuthCredentials): String {
+        val token = "${credentials.username}:${credentials.password}".toByteArray(Charsets.UTF_8)
+        return "Basic " + java.util.Base64.getEncoder().encodeToString(token)
     }
 
     /** Explicit non-blank cookie wins; otherwise the lazily read shared-store cookie; else null (#75). */
