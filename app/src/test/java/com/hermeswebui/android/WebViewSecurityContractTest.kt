@@ -129,6 +129,34 @@ class WebViewSecurityContractTest {
     }
 
     @Test
+    fun `http auth challenges are host checked before any credentials are sent`() {
+        // Issue #185: every WebView client routes HTTP auth through the one guarded handler, which
+        // checks the exact configured host before proceeding with any username/password.
+        val overrides = codeOnly.flatMap { (path, text) ->
+            bodiesOf(text, "override fun onReceivedHttpAuthRequest(").map { path to it }
+        }
+        assertThat(overrides).hasSize(2)
+        overrides.forEach { (path, body) ->
+            assertWithMessage("$path onReceivedHttpAuthRequest").that(body)
+                .contains("handleHttpAuthRequest(handler, host, realm)")
+            assertWithMessage("$path onReceivedHttpAuthRequest").that(body).doesNotContain("proceed")
+        }
+        val mainActivity = codeOnly.entries.single { it.key.endsWith("MainActivity.kt") }.value
+        val handler = bodiesOf(mainActivity, "private fun handleHttpAuthRequest(").single()
+        val guardAt = handler.indexOf("acceptsHttpAuthChallenge(host)")
+        assertThat(guardAt).isAtLeast(0)
+        assertThat(handler.indexOf("proceed(")).isGreaterThan(guardAt)
+
+        // Any other use of HttpAuthHandler could proceed() from somewhere this guard does not see.
+        val uses = codeOnly.values.sumOf { text ->
+            text.lines()
+                .filterNot { it.trimStart().startsWith("import ") }
+                .sumOf { Regex("""\bHttpAuthHandler\b""").findAll(it).count() }
+        }
+        assertThat(uses).isEqualTo(overrides.size + 1)
+    }
+
+    @Test
     fun `manifest declares the permissions WebUI features depend on`() {
         val declared = Regex("""<uses-permission[^>]*android:name="([^"]+)"""")
             .findAll(manifest)

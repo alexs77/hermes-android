@@ -51,6 +51,26 @@ class SettingsRepository(context: Context) : SettingsStore {
         }
     }
 
+    /**
+     * Reverse-proxy HTTP Basic credentials (#185), keyed by the exact page origin of [url] so they
+     * are only ever offered back to that origin. Stored in this encrypted file like the
+     * client-certificate password; never logged.
+     */
+    fun getProxyBasicAuth(url: String): HermesApiClient.BasicAuthCredentials? {
+        val key = proxyBasicAuthKey(url) ?: return null
+        return decodeProxyBasicAuth(sharedPreferences.getString(key, null))
+    }
+
+    fun saveProxyBasicAuth(url: String, credentials: HermesApiClient.BasicAuthCredentials) {
+        val key = proxyBasicAuthKey(url) ?: return
+        sharedPreferences.edit { putString(key, encodeProxyBasicAuth(credentials)) }
+    }
+
+    fun clearProxyBasicAuth(url: String) {
+        val key = proxyBasicAuthKey(url) ?: return
+        sharedPreferences.edit { remove(key) }
+    }
+
     init {
         // Migrate away from storing dashboard URLs in Android preferences.
         // Versions before 0.1.5 stored a dashboard URL in SharedPreferences and injected it
@@ -456,8 +476,13 @@ class SettingsRepository(context: Context) : SettingsStore {
 
     fun deleteProfile(profileId: String) {
         val profiles = getProfiles().toMutableList()
+        val deletedUrl = profiles.firstOrNull { it.id == profileId }?.url
         profiles.removeAll { it.id == profileId }
         saveProfiles(profiles)
+        // Forget proxy credentials once no remaining profile uses that origin.
+        if (deletedUrl != null && profiles.none { proxyBasicAuthKey(it.url) == proxyBasicAuthKey(deletedUrl) }) {
+            clearProxyBasicAuth(deletedUrl)
+        }
         // If deleted profile was active, clear active state
         if (sharedPreferences.getString(KEY_ACTIVE_PROFILE_ID, null) == profileId) {
             sharedPreferences.edit { remove(KEY_ACTIVE_PROFILE_ID) }
@@ -581,6 +606,7 @@ class SettingsRepository(context: Context) : SettingsStore {
         private const val KEY_AUTH_PROMPT_SILENCED_URLS = "auth_prompt_silenced_urls"
         private const val KEY_CLIENT_CERT_URI = "client_cert_uri"
         private const val KEY_CLIENT_CERT_PASSWORD = "client_cert_password"
+        private const val KEY_PROXY_BASIC_AUTH_PREFIX = "proxy_basic_auth:"
         private const val KEY_LAST_MIGRATION_VERSION = "last_migration_version"
         private const val DEFAULT_VPN_LAUNCH_PACKAGE = "com.tailscale.ipn"
         private const val DEFAULT_RECONNECT_POLL_INTERVAL_SECONDS = 1
@@ -589,6 +615,26 @@ class SettingsRepository(context: Context) : SettingsStore {
         // Profile-related keys
         private const val KEY_SERVER_PROFILES = "server_profiles"
         private const val KEY_ACTIVE_PROFILE_ID = "active_profile_id"
+
+        /** Preference key for proxy Basic credentials: the exact page origin, or null (fail closed). */
+        internal fun proxyBasicAuthKey(url: String): String? =
+            UrlOrigins.pageOrigin(url)?.let { KEY_PROXY_BASIC_AUTH_PREFIX + it }
+
+        internal fun encodeProxyBasicAuth(credentials: HermesApiClient.BasicAuthCredentials): String =
+            JSONObject()
+                .put("username", credentials.username)
+                .put("password", credentials.password)
+                .toString()
+
+        internal fun decodeProxyBasicAuth(stored: String?): HermesApiClient.BasicAuthCredentials? {
+            if (stored.isNullOrBlank()) return null
+            return try {
+                val obj = JSONObject(stored)
+                HermesApiClient.BasicAuthCredentials(obj.getString("username"), obj.getString("password"))
+            } catch (_: JSONException) {
+                null
+            }
+        }
 
         /**
          * Parse the persisted profiles JSON, deriving `isActive` from the active-profile id (the
